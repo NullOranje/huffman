@@ -3,6 +3,7 @@
 #include <map>
 #include <queue>
 #include <stack>
+#include <unordered_map>
 
 /* Huffman Tuple
  * This is the data. */
@@ -83,7 +84,11 @@ unsigned long stringToLongBuffer(std::string s, unsigned long buffer) {
     return buffer;
 }
 
-uint* bytesToBitsOut(unsigned long buffer, int length, std::ofstream *output) {
+std::string recoverBitStringFromFile(int bits, std::ifstream *input, unsigned long buffer) {
+
+}
+
+uint *bytesToBitsOut(unsigned long buffer, int length, std::ofstream &output) {
     std::stack<unsigned char> output_stack;
     uint *ret_val = new uint[2];
 
@@ -99,7 +104,7 @@ uint* bytesToBitsOut(unsigned long buffer, int length, std::ofstream *output) {
     while (!output_stack.empty()) {
         unsigned char out = output_stack.top();
         output_stack.pop();
-        *output << out;
+        output << out;
     }
 
     // Compute remaining data mask
@@ -119,6 +124,7 @@ int main(int argc, char *argv[]) {
     std::ifstream input_file;
     std::ofstream output_file;
     std::string mode;
+    h_tuple *dictionary[256];
 
     /* Command line argument parsing */
     if (argc == 4) {
@@ -139,94 +145,107 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 
-    // Gather statistics
-    double counter = 0.0;
-    double p_x[256] = {};
+    if (mode == "-z") {
+        // Gather statistics
+        double counter = 0.0;
+        double p_x[256] = {};
 
-    unsigned char in;
-    while (in = (unsigned char) input_file.get(), input_file.good()) {
-        p_x[in]++;
-        counter++;
-    }
-    input_file.close();
-    for (int i = 0; i < 256; i++)
-        p_x[i] /= counter;
+        unsigned char in;
+        while (in = (unsigned char) input_file.get(), input_file.good()) {
+            p_x[in]++;
+            counter++;
+        }
+        input_file.close();
+        for (int i = 0; i < 256; i++)
+            p_x[i] /= counter;
 
-    // Build tree and dictionary
-    std::priority_queue<node *, std::vector<node *>, compare_nodes> pq;
-    for (int i = 0; i < 256; i++) {
-        if (p_x[i] > 0) {
-            h_tuple *t = new h_tuple(p_x[i]);
-            node *n = new node((char) i, t);
+        // Build tree and dictionary
+        std::priority_queue<node *, std::vector<node *>, compare_nodes> pq;
+        for (int i = 0; i < 256; i++) {
+            if (p_x[i] > 0) {
+                h_tuple *t = new h_tuple(p_x[i]);
+                node *n = new node((char) i, t);
+                pq.push(n);
+            }
+        }
+
+        // Condense the individual trees into a single tree.
+        while (pq.size() > 1) {
+            auto l = pq.top();
+            pq.pop();
+            auto r = pq.top();
+            pq.pop();
+            h_tuple *h = new h_tuple(l->data->p + r->data->p);
+            node *n = new node(0, h);
+            n->left = l;
+            n->right = r;
             pq.push(n);
         }
-    }
 
-    // Condense the individual trees into a single tree.
-    while (pq.size() > 1) {
-        auto l = pq.top();
-        pq.pop();
-        auto r = pq.top();
-        pq.pop();
-        h_tuple *h = new h_tuple(l->data->p + r->data->p);
-        node *n = new node(0, h);
-        n->left = l;
-        n->right = r;
-        pq.push(n);
-    }
+        // Build dictionary
+        for (int i = 0; i < 256; i++)
+            dictionary[i] = new h_tuple;
+        auto n = pq.top();
+        build_codes("", n, 0, dictionary);
 
-    // Build dictionary
-    h_tuple *dictionary[256];
-    for (int i = 0; i < 256; i++)
-        dictionary[i] = new h_tuple;
-    auto n = pq.top();
-    build_codes("", n, 0, dictionary);
+        for (int i = 0; i < 256; i++) {
+            if (dictionary[i]->bits > 0)
+                std::cout << (char) i << ":" << dictionary[i]->bits << ":" << dictionary[i]->code << std::endl;
+        }
 
-    for (int i = 0; i < 256; i++) {
-        if (dictionary[i]->bits > 0)
-            std::cout << (char) i << ":" << dictionary[i]->bits << ":" << dictionary[i]->code << std::endl;
-    }
+        /* Store dictionary to file */
+        // Store the dictionary preamble
+        for (int i = 0; i < 256; i++)
+            output_file << (char) (dictionary[i]->bits);
 
-    /* Store dictionary to file */
-    // Store the dictionary preamble
-    for (int i = 0; i < 256; i++)
-        output_file << (char) (dictionary[i]->bits);
+        // Store the bits
+        unsigned long buffer = 0;
+        int buf_len = 0;
+        for (int i = 0; i < 256; i++) {
+            std::string c = dictionary[i]->code;
+            buf_len += dictionary[i]->bits;
+            buffer = stringToLongBuffer(c, buffer);
+            uint *updates = bytesToBitsOut(buffer, buf_len, output_file);
+            buffer = updates[0];
+            buf_len = updates[1];
+        }
+        // Handle the residual bits
+        if (buf_len > 0) {
+            buffer = buffer << (8 - buf_len);
+            bytesToBitsOut(buffer, 8, output_file);
+        }
 
-    // Store the bits
-    unsigned long buffer = 0;
-    int buf_len = 0;
-    for (int i = 0; i < 256; i++) {
-        std::string c = dictionary[i]->code;
-        buf_len += dictionary[i]-> bits;
-        buffer = stringToLongBuffer(c, buffer);
-        uint *updates = bytesToBitsOut(buffer, buf_len, &output_file);
-        buffer = updates[0];
-        buf_len = updates[1];
-    }
-    // Handle the residual bits
-    if (buf_len > 0) {
-        buffer = buffer << (8 - buf_len);
-        bytesToBitsOut(buffer, 8, &output_file);
-    }
+        // Encode the input file and write to output
+        input_file.open(argv[2]);
+        std::string encoded;
+        buf_len = 0;
+        buffer = 0;
+        while (in = (unsigned char) input_file.get(), input_file.good()) {
+            buf_len += dictionary[in]->bits;
+            buffer = stringToLongBuffer(dictionary[in]->code, buffer);
+            uint *updates = bytesToBitsOut(buffer, buf_len, output_file);
+            buffer = updates[0];
+            buf_len = updates[1];
+        }
+        // Handle the residual bits
+        if (buf_len > 0) {
+            buffer = buffer << (8 - buf_len);
+            bytesToBitsOut(buffer, 8, output_file);
+        }
+    } else if (mode == "-x") {
+        // Recover the dictionary preamble
+        unsigned char in;
+        for (int i = 0; i < 256; i++) {
+            in = (unsigned char) input_file.get();
+            dictionary[i] = new h_tuple(in, 0, "");
+        }
 
-    // Encode the input file and write to output
-    input_file.open(argv[2]);
-    std::string encoded;
-    buf_len = 0;
-    buffer = 0;
-    while (in = (unsigned char) input_file.get(), input_file.good()) {
-        buf_len += dictionary[in]->bits;
-        buffer = stringToLongBuffer(dictionary[in]->code, buffer);
-        uint *updates = bytesToBitsOut(buffer, buf_len, &output_file);
-        buffer = updates[0];
-        buf_len = updates[1];
-    }
-    // Handle the residual bits
-    if (buf_len > 0) {
-        buffer = buffer << (8 - buf_len);
-        bytesToBitsOut(buffer, 8, &output_file);
-    }
+        // Recover the codes
 
+
+        // Recover bits from file; output if they match a code
+
+    }
 
     return 0;
 }
