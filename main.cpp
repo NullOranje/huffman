@@ -4,6 +4,7 @@
 #include <queue>
 #include <stack>
 #include <unordered_map>
+#include <chrono>
 
 /* Huffman Tuple
  * This is the data. */
@@ -61,9 +62,9 @@ void print_usage() {
 void build_codes(std::string s, node *n, int depth, h_tuple *dict[]) {
     if ((n->left) || (n->right)) {   // We hit on at least one leaf, so our code is not complete
         if (n->left)
-            build_codes(s + "0", n->left, depth + 1, dict);
+            build_codes(s + "1", n->left, depth + 1, dict);
         if (n->right)  // We've exhausted all children
-            build_codes(s + "1", n->right, depth + 1, dict);
+            build_codes(s + "0", n->right, depth + 1, dict);
     } else {
         h_tuple *t = new h_tuple;
         t->bits = depth;
@@ -73,51 +74,64 @@ void build_codes(std::string s, node *n, int depth, h_tuple *dict[]) {
     }
 }
 
-unsigned long stringToLongBuffer(std::string s, unsigned long buffer) {
+void stringToLongBuffer(std::string s, unsigned long &buffer) {
     for (uint b = 0; b < s.length(); b++) {
         buffer = buffer << 1;
         int t = s.at(b);
         if (t == 49)
             buffer++;
     }
-
-    return buffer;
 }
 
-std::string recoverBitStringFromFile(int bits, std::ifstream *input, unsigned long buffer) {
+std::string recoverBitStringFromFile(int bits, std::ifstream &input, unsigned char &buffer, unsigned char &buf_mask) {
+    std::string retval = "";
+    for (int i = 0; i < bits; i++) {
+        if (buf_mask == 0) {
+            buffer = (unsigned char) input.get();
+            buf_mask = 128;
+        }
 
+        uint bit = (buffer & buf_mask);
+        if (bit > 0)
+            retval += "1";
+        else
+            retval += "0";
+
+        buf_mask = buf_mask >> 1;
+    }
+
+    return retval;
 }
 
-uint *bytesToBitsOut(unsigned long buffer, int length, std::ofstream &output) {
+void bytesToBitsOut(unsigned long &buffer, int &length, std::ofstream &output) {
     std::stack<unsigned char> output_stack;
-    uint *ret_val = new uint[2];
 
     auto offset = (length - (length % 8)) / 8;
-    auto data = buffer >> offset;  // Align our buffer to bytes
-    while (offset > 0) {
-        unsigned char t = (unsigned char) (data & 0xFF);
-        output_stack.push(t);
-        data = data >> 8;
-        offset--;
+    auto data = buffer >> (length % 8);  // Align our buffer to bytes
+    if (offset > 0) {
+        while (offset > 0) {
+            unsigned char t = (unsigned char) (data & 0xFF);
+            output_stack.push(t);
+            data = data >> 8;
+            offset--;
+        }
+
+        while (!output_stack.empty()) {
+            unsigned char out = output_stack.top();
+            output_stack.pop();
+            output << out;
+        }
+
+        // Compute remaining data mask
+        uint mask = 0;
+        for (int i = 0; i < (length % 8); i++) {
+            mask = mask << 1;
+            mask++;
+        }
+
+        buffer &= mask;
+        length %= 8;
     }
-
-    while (!output_stack.empty()) {
-        unsigned char out = output_stack.top();
-        output_stack.pop();
-        output << out;
-    }
-
-    // Compute remaining data mask
-    uint mask = 0;
-    for (int i = 0; i < (length % 8); i++) {
-        mask = mask << 1;
-        mask++;
-    }
-
-    ret_val[0] = (uint) (buffer & mask);
-    ret_val[1] = (uint) (length % 8);
-
-    return ret_val;
 }
 
 int main(int argc, char *argv[]) {
@@ -145,6 +159,7 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 
+    auto start = std::chrono::high_resolution_clock::now();
     if (mode == "-z") {
         // Gather statistics
         double counter = 0.0;
@@ -188,11 +203,6 @@ int main(int argc, char *argv[]) {
         auto n = pq.top();
         build_codes("", n, 0, dictionary);
 
-        for (int i = 0; i < 256; i++) {
-            if (dictionary[i]->bits > 0)
-                std::cout << (char) i << ":" << dictionary[i]->bits << ":" << dictionary[i]->code << std::endl;
-        }
-
         /* Store dictionary to file */
         // Store the dictionary preamble
         for (int i = 0; i < 256; i++)
@@ -203,16 +213,17 @@ int main(int argc, char *argv[]) {
         int buf_len = 0;
         for (int i = 0; i < 256; i++) {
             std::string c = dictionary[i]->code;
-            buf_len += dictionary[i]->bits;
-            buffer = stringToLongBuffer(c, buffer);
-            uint *updates = bytesToBitsOut(buffer, buf_len, output_file);
-            buffer = updates[0];
-            buf_len = updates[1];
+            if (c != "") {
+                buf_len += dictionary[i]->bits;
+                stringToLongBuffer(c, buffer);  // <-- This function is the problem.
+                bytesToBitsOut(buffer, buf_len, output_file);
+            }
         }
         // Handle the residual bits
         if (buf_len > 0) {
             buffer = buffer << (8 - buf_len);
-            bytesToBitsOut(buffer, 8, output_file);
+            buf_len = 8;
+            bytesToBitsOut(buffer, buf_len, output_file);
         }
 
         // Encode the input file and write to output
@@ -222,15 +233,14 @@ int main(int argc, char *argv[]) {
         buffer = 0;
         while (in = (unsigned char) input_file.get(), input_file.good()) {
             buf_len += dictionary[in]->bits;
-            buffer = stringToLongBuffer(dictionary[in]->code, buffer);
-            uint *updates = bytesToBitsOut(buffer, buf_len, output_file);
-            buffer = updates[0];
-            buf_len = updates[1];
+            stringToLongBuffer(dictionary[in]->code, buffer);
+            bytesToBitsOut(buffer, buf_len, output_file);
         }
         // Handle the residual bits
         if (buf_len > 0) {
             buffer = buffer << (8 - buf_len);
-            bytesToBitsOut(buffer, 8, output_file);
+            buf_len = 8;
+            bytesToBitsOut(buffer, buf_len, output_file);
         }
     } else if (mode == "-x") {
         // Recover the dictionary preamble
@@ -240,12 +250,35 @@ int main(int argc, char *argv[]) {
             dictionary[i] = new h_tuple(in, 0, "");
         }
 
-        // Recover the codes
+        // Recover the codewords and build lookup table
+        unsigned char buffer = 0;
+        unsigned char buffer_mask = 0;
+        std::unordered_map<std::string, char> codebook;
 
+        for (int i = 0; i < 256; i++)
+            if (dictionary[i]->bits > 0) {
+                dictionary[i]->code = recoverBitStringFromFile(dictionary[i]->bits, input_file, buffer, buffer_mask);
+                codebook[dictionary[i]->code] = (char) i;
+            }
 
         // Recover bits from file; output if they match a code
-
+        std::string string_buffer = "";
+        buffer = 0;
+        buffer_mask = 0;
+        while (input_file.good()) {
+            string_buffer += recoverBitStringFromFile(1, input_file, buffer, buffer_mask);
+            auto plain_char = codebook.find(string_buffer);
+            if (plain_char != codebook.end()) {
+                output_file << plain_char->second;
+                string_buffer = "";
+            }
+        }
     }
 
+    auto stop = std::chrono::high_resolution_clock::now();
+    std::cout << "Running time: " << std::chrono::duration_cast<std::chrono::milliseconds>(stop - start).count() << "ms." << std::endl;
+
+    input_file.close();
+    output_file.close();
     return 0;
 }
